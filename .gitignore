@@ -1,5 +1,6 @@
 # Python
 backend/.venv/
+.venv/
 backend/__pycache__/
 backend/*.sqlite3
 backend/media/

@@ -1,8 +1,10 @@
 from decimal import Decimal
 from django.db.models import Sum
+from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
+from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework import status
 from drf_spectacular.utils import extend_schema, OpenApiParameter
@@ -13,70 +15,76 @@ from .serializers import BudgetSerializer
 class BudgetViewSet(viewsets.ModelViewSet):
     serializer_class = BudgetSerializer
     permission_classes = [IsAuthenticated]
+    serializer_class = BudgetSerializer
 
     def get_queryset(self):
-        qs = Budget.objects.filter(owner=self.request.user).order_by("-month", "scope")
-        month = self.request.query_params.get("month")
-        if month:
-            qs = qs.filter(month=month)
-        return qs
-
-    def perform_create(self, serializer):
-        serializer.save(owner=self.request.user)
-
-    def perform_destroy(self, instance):
-        instance.delete()
-
-
-class BudgetStatusView(APIView):
-    permission_classes = [IsAuthenticated]
+        return Budget.objects.filter(owner=self.request.user).order_by("-created_at")
 
     @extend_schema(
         tags=["budgets"],
         parameters=[
-            OpenApiParameter("month", str, required=True, description="YYYY-MM"),
+            OpenApiParameter(
+                name="month",
+                type=str,
+                location=OpenApiParameter.QUERY,
+                required=True,
+                description="YYYY-MM",
+            ),
         ],
         responses={200: dict},
     )
-    def get(self, request):
+
+    @action(detail=False, methods=["get"], url_path="status")
+    def status(self, request):
         month = request.query_params.get("month")
         if not month or len(month) != 7 or month[4] != "-":
-            return Response({"detail": "month is required (YYYY-MM)"}, status=400)
+            return Response({"detail": "month must be YYYY-MM"}, status=400)
 
-        # ช่วงวันที่ของเดือน (ใช้ occurred_at__date__startswith)
-        # ง่ายและพอสำหรับ MVP
+        y = int(month[:4])
+        m = int(month[5:7])
+        start = timezone.datetime(y, m, 1, tzinfo=timezone.get_current_timezone())
+        if m == 12:
+            end = timezone.datetime(y + 1, 1, 1, tzinfo=timezone.get_current_timezone())
+        else:
+            end = timezone.datetime(y, m + 1, 1, tzinfo=timezone.get_current_timezone())
+
+        user = request.user
+        base_currency = getattr(getattr(user, "profile", None), "base_currency", "THB")
+
         tx_qs = Transaction.objects.filter(
-            owner=request.user,
+            owner=user,
             is_deleted=False,
-            occurred_at__date__startswith=month,
+            type="expense",
+            occurred_at__gte=start,
+            occurred_at__lt=end,
         )
 
-        base_currency = request.user.profile.base_currency
-
-        budgets = Budget.objects.filter(owner=request.user, month=month).select_related("category")
+        budgets = Budget.objects.filter(owner=user, month=month).select_related("category")
 
         items = []
         for b in budgets:
-            if b.scope == Budget.Scope.TOTAL:
-                spent = tx_qs.filter(type="expense").aggregate(s=Sum("base_amount"))["s"] or Decimal("0")
+            if b.scope == "total":
+                spent = tx_qs.aggregate(s=Sum("base_amount"))["s"] or Decimal("0")
                 title = "Total Budget"
+                category_id = None
             else:
-                spent = tx_qs.filter(type="expense", category=b.category).aggregate(s=Sum("base_amount"))["s"] or Decimal("0")
-                title = f"Category: {b.category.name}"
+                spent = tx_qs.filter(category_id=b.category_id).aggregate(s=Sum("base_amount"))["s"] or Decimal("0")
+                title = f"Category: {b.category.name if b.category else 'Uncategorized'}"
+                category_id = b.category_id
 
-            limit_amt = b.limit_base_amount
-            remaining = limit_amt - spent
-            percent = (spent / limit_amt * Decimal("100")) if limit_amt > 0 else Decimal("0")
+            limit = Decimal(b.limit_base_amount)
+            remaining = limit - spent
+            pct = (spent / limit * 100) if limit > 0 else Decimal("0")
 
             items.append({
                 "budget_id": b.id,
                 "title": title,
                 "scope": b.scope,
-                "category_id": b.category.id if b.category else None,
-                "limit": str(limit_amt),
-                "spent": str(spent),
-                "remaining": str(remaining),
-                "percent_used": str(percent.quantize(Decimal("0.01"))),
+                "category_id": category_id,
+                "limit": f"{limit:.2f}",
+                "spent": f"{spent:.2f}",
+                "remaining": f"{remaining:.2f}",
+                "percent_used": f"{pct:.2f}",
                 "alert_80_sent": b.alert_80_sent,
                 "alert_100_sent": b.alert_100_sent,
             })
@@ -86,3 +94,9 @@ class BudgetStatusView(APIView):
             "base_currency": base_currency,
             "items": items,
         })
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+    def perform_destroy(self, instance):
+        instance.delete()

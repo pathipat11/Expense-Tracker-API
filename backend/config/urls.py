@@ -30,7 +30,6 @@ urlpatterns = [
     path("api/auth/", include("users.urls")),
     path("api/", include("finance.urls")),
     path("api/", include("finance.reports_urls")),
-    path("api/", include("finance.budgets_urls")),
     path("api/", include("finance.receipts_urls")),
     path("api/", include("finance.ai_urls")),
 ]

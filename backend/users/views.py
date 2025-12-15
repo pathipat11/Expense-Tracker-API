@@ -102,18 +102,29 @@ class RefreshView(APIView):
             return Response({"detail": "Missing refresh cookie"}, status=status.HTTP_401_UNAUTHORIZED)
 
         try:
-            refresh = RefreshToken(refresh_token)
+            old_refresh = RefreshToken(refresh_token)
 
-            # rotate refresh token (ตาม SIMPLE_JWT)
-            new_refresh = refresh
+            # ✅ ดึง user_id จาก payload แล้ว query user เอง
+            user_id = old_refresh.get("user_id")
+            if not user_id:
+                return Response({"detail": "Invalid refresh token"}, status=status.HTTP_401_UNAUTHORIZED)
+
+            user = User.objects.filter(id=user_id, is_active=True).first()
+            if not user:
+                return Response({"detail": "User not found"}, status=status.HTTP_401_UNAUTHORIZED)
+
+            # ✅ rotate refresh (ถ้าเปิด)
             if settings.SIMPLE_JWT.get("ROTATE_REFRESH_TOKENS", False):
-                new_refresh = RefreshToken.for_user(refresh.user)
+                new_refresh = RefreshToken.for_user(user)
+
                 # blacklist token เก่าถ้าเปิดไว้
                 if settings.SIMPLE_JWT.get("BLACKLIST_AFTER_ROTATION", False):
                     try:
-                        refresh.blacklist()
+                        old_refresh.blacklist()
                     except Exception:
                         pass
+            else:
+                new_refresh = old_refresh
 
             access = str(new_refresh.access_token)
 
