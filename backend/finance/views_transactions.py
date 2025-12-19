@@ -1,11 +1,20 @@
-from urllib import response
+from django.utils.dateparse import parse_date
+from django_filters.rest_framework import DjangoFilterBackend
+
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
-from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework.response import Response
 
 from .models import FxRate, Category, Transaction
-from .serializers import FxRateSerializer, CategorySerializer, TransactionSerializer, TransferCreateSerializer
+from .serializers import (
+    FxRateSerializer,
+    CategorySerializer,
+    TransactionSerializer,
+    TransferCreateSerializer,
+)
+from .pagination import StandardResultsSetPagination
+
 
 class FxRateViewSet(viewsets.ModelViewSet):
     """
@@ -35,11 +44,36 @@ class CategoryViewSet(viewsets.ModelViewSet):
 class TransactionViewSet(viewsets.ModelViewSet):
     serializer_class = TransactionSerializer
     permission_classes = [IsAuthenticated]
+
+    # ✅ เปิดทั้ง filter + pagination
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ["type", "wallet", "category"]
+    pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
-        return Transaction.objects.filter(owner=self.request.user, is_deleted=False).order_by("-occurred_at")
+        """
+        รองรับ query:
+            - from=YYYY-MM-DD
+            - to=YYYY-MM-DD
+            - type=...
+            - wallet=<id>
+            - category=<id>
+
+        หมายเหตุ: type/wallet/category มีอยู่แล้วผ่าน DjangoFilterBackend
+        แต่ from/to ต้อง filter เอง (date range)
+        """
+        qs = Transaction.objects.filter(owner=self.request.user, is_deleted=False).order_by("-occurred_at")
+
+        f_s = self.request.query_params.get("from")
+        t_s = self.request.query_params.get("to")
+
+        if f_s and t_s:
+            f = parse_date(f_s)
+            t = parse_date(t_s)
+            if f and t:
+                qs = qs.filter(occurred_at__date__gte=f, occurred_at__date__lte=t)
+
+        return qs
 
     def perform_destroy(self, instance):
         # soft delete
@@ -51,7 +85,8 @@ class TransactionViewSet(viewsets.ModelViewSet):
         ser = TransferCreateSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
         result = ser.save()
-        return response(
+
+        return Response(
             {
                 "link_id": result["link_id"],
                 "out_tx": TransactionSerializer(result["out_tx"], context={"request": request}).data,
